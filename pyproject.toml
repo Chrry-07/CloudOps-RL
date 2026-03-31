@@ -1,0 +1,13 @@
+[project]
+name = "cloudops-rl"
+version = "0.1.0"
+description = "AI Incident Response & Infrastructure Optimization Environment"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "openenv-core>=0.2.0"
+]
+
+[project.scripts]
+server = "server.app:main"

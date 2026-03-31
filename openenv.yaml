@@ -1,0 +1,56 @@
+name: CloudOps-RL
+version: 1.0.0
+
+description: >
+  A benchmark-grade OpenEnv environment where an AI agent monitors
+  cloud infrastructure metrics, diagnoses system incidents, and takes
+  corrective actions to maximize uptime while minimizing operational cost.
+
+entrypoint:
+  reset: /reset
+  step: /step
+  state: /state
+
+observation_space:
+  cpu_usage: integer
+  memory_usage: integer
+  latency_ms: integer
+  error_rate: float
+  traffic_load: string
+  active_servers: integer
+  db_health: string
+  cost_per_hour: integer
+
+action_space:
+  - scale_up
+  - scale_down
+  - restart_service
+  - restart_database
+  - rebalance_traffic
+  - clear_cache
+  - remove_idle_resource
+  - noop
+
+tasks:
+  - name: Resource Cleanup
+    difficulty: easy
+    objective: Reduce cost without affecting uptime
+
+  - name: Performance Optimization
+    difficulty: medium
+    objective: Balance performance and cost
+
+  - name: Incident Response
+    difficulty: hard
+    objective: Recover from sudden infrastructure failures
+
+reward:
+  type: dense
+  range: [0.0, 1.0]
+  description: >
+    Reward is based on uptime stability, latency reduction,
+    error minimization, and cost efficiency.
+
+grader:
+  deterministic: true
+  score_range: [0.0, 1.0]
