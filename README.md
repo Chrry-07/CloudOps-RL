@@ -57,6 +57,18 @@ The multi-factor reward formula evaluates:
 
 ---
 
+## System Architecture
+
+CloudOps-RL follows a modular benchmark architecture:
+
+- **FastAPI server layer** → exposes `/reset`, `/step`, `/state`
+- **Environment engine** → simulates cloud drift and incident propagation
+- **Reward engine** → computes dynamic multi-factor rewards
+- **Task grader** → evaluates performance across easy, medium, hard scenarios
+- **Inference baseline** → reproducible agent script for evaluation
+
+---
+
 ## 🚀 Quick Start & Testing
 
 You can interact with the live environment directly through the auto-generated Swagger UI! 
