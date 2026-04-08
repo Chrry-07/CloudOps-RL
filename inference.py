@@ -6,9 +6,29 @@ CloudOps-RL baseline agent
 import os
 import json
 import requests
-import textwrap
 from typing import List, Optional
 from openai import OpenAI
+
+# =========================
+# REQUIRED VALIDATOR VARIABLES
+# =========================
+API_BASE_URL = os.environ.get(
+    "API_BASE_URL",
+    "https://router.huggingface.co/v1"
+).strip()
+
+API_KEY = os.environ.get("API_KEY", "dummy").strip()
+
+MODEL_NAME = os.environ.get(
+    "MODEL_NAME",
+    "Qwen/Qwen2.5-72B-Instruct"
+)
+
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+
+# Fix malformed URL edge case
+if API_BASE_URL and not API_BASE_URL.startswith("http"):
+    API_BASE_URL = "http://" + API_BASE_URL
 
 LOCAL_ENV = None
 MAX_STEPS = 10
@@ -40,44 +60,99 @@ Return ONLY the action.
 """.strip()
 
 
+# =========================
+# LOGGING
+# =========================
 def log_start(task: str, env: str, model: str):
-    print(f"[START] task={task} env={env} model={model}", flush=True)
+    print(
+        f"[START] task={task} env={env} model={model}",
+        flush=True
+    )
 
 
-def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]):
+def log_step(
+    step: int,
+    action: str,
+    reward: float,
+    done: bool,
+    error: Optional[str]
+):
     error_val = error if error else "null"
+
     print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error_val}",
+        f"[STEP] step={step} "
+        f"action={action} "
+        f"reward={reward:.2f} "
+        f"done={str(done).lower()} "
+        f"error={error_val}",
         flush=True,
     )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]):
+def log_end(
+    success: bool,
+    steps: int,
+    score: float,
+    rewards: List[float]
+):
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} "
+        f"steps={steps} "
+        f"score={score:.3f} "
+        f"rewards={rewards_str}",
         flush=True,
     )
+
+
+# =========================
+# ENV HELPERS
+# =========================
+def state_to_dict(obj):
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+
+    if hasattr(obj, "dict"):
+        return obj.dict()
+
+    return obj
 
 
 def env_reset():
     global LOCAL_ENV
-    env_url = os.environ.get("ENV_URL", "http://127.0.0.1:7860").rstrip("/")
+
+    env_url = os.environ.get(
+        "ENV_URL",
+        "http://127.0.0.1:7860"
+    ).rstrip("/")
 
     try:
-        r = requests.post(f"{env_url}/reset", timeout=20)
+        r = requests.post(
+            f"{env_url}/reset",
+            timeout=20
+        )
         r.raise_for_status()
+
         data = r.json()
+
         return data.get("state", data)
+
     except Exception:
         from env import CloudOpsEnv
+
         LOCAL_ENV = CloudOpsEnv()
+
         return state_to_dict(LOCAL_ENV.reset())
 
 
 def env_step(action: str):
     global LOCAL_ENV
-    env_url = os.environ.get("ENV_URL", "http://127.0.0.1:7860").rstrip("/")
+
+    env_url = os.environ.get(
+        "ENV_URL",
+        "http://127.0.0.1:7860"
+    ).rstrip("/")
 
     try:
         r = requests.post(
@@ -85,7 +160,9 @@ def env_step(action: str):
             json={"action": action},
             timeout=20
         )
+
         r.raise_for_status()
+
         data = r.json()
 
         return (
@@ -98,33 +175,43 @@ def env_step(action: str):
     except Exception:
         if LOCAL_ENV is None:
             from env import CloudOpsEnv
+
             LOCAL_ENV = CloudOpsEnv()
             LOCAL_ENV.reset()
 
-        s, r, d = LOCAL_ENV.step(action)
-        return state_to_dict(s), float(r), bool(d), None
+        state, reward, done = LOCAL_ENV.step(action)
+
+        return (
+            state_to_dict(state),
+            float(reward),
+            bool(done),
+            None
+        )
 
 
-def state_to_dict(obj):
-    if hasattr(obj, "model_dump"):
-        return obj.model_dump()
-    if hasattr(obj, "dict"):
-        return obj.dict()
-    return obj
-
-
+# =========================
+# LLM ACTION
+# =========================
 def llm_action(client, state, model_name):
     response = client.chat.completions.create(
         model=model_name,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(state)},
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": json.dumps(state)
+            },
         ],
         temperature=0.1,
         max_tokens=10,
     )
 
-    raw = (response.choices[0].message.content or "").strip().lower()
+    raw = (
+        response.choices[0].message.content or ""
+    ).strip().lower()
 
     for action in VALID_ACTIONS:
         if action in raw:
@@ -133,6 +220,9 @@ def llm_action(client, state, model_name):
     return "noop"
 
 
+# =========================
+# FALLBACK POLICY
+# =========================
 def fallback_policy(state):
     cpu = state.get("cpu_usage", 0)
     latency = state.get("latency_ms", 0)
@@ -141,30 +231,27 @@ def fallback_policy(state):
 
     if db_health == "degraded":
         return "restart_database"
+
     if cpu > 80:
         return "scale_up"
+
     if latency > 300:
         return "rebalance_traffic"
+
     if error_rate > 0.10:
         return "rebalance_traffic"
 
     return "clear_cache"
 
 
+# =========================
+# MAIN
+# =========================
 def main():
     task_name = "incident_response"
     benchmark = "cloudops_rl"
 
-    # SAFELY get variables so a missing key doesn't crash the script locally
-    raw_url = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1").strip()
-    api_key = os.environ.get("API_KEY", "dummy").strip()
-    model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-
-    # FIX the grader's malformed URL bug by injecting http:// if missing
-    if raw_url and not raw_url.startswith("http"):
-        raw_url = "http://" + raw_url
-
-    log_start(task_name, benchmark, model_name)
+    log_start(task_name, benchmark, MODEL_NAME)
 
     rewards = []
     score = 0.0
@@ -172,11 +259,17 @@ def main():
     steps_taken = 0
 
     try:
-        # Wrap client initialization in a try block in case the URL is completely broken
         try:
-            client = OpenAI(base_url=raw_url, api_key=api_key)
+            client = OpenAI(
+                base_url=API_BASE_URL,
+                api_key=API_KEY
+            )
+
         except Exception as e:
-            print(f"[DEBUG] OpenAI Init Failed: {e}", flush=True)
+            print(
+                f"[DEBUG] OpenAI Init Failed: {e}",
+                flush=True
+            )
             client = None
 
         state = env_reset()
@@ -184,10 +277,17 @@ def main():
 
         for step in range(1, MAX_STEPS + 1):
             try:
-                # If the client failed to initialize, instantly trigger the fallback policy
                 if client is None:
-                    raise ValueError("No LLM client available")
-                action = llm_action(client, state, model_name)
+                    raise ValueError(
+                        "No LLM client available"
+                    )
+
+                action = llm_action(
+                    client,
+                    state,
+                    MODEL_NAME
+                )
+
             except Exception:
                 action = fallback_policy(state)
 
@@ -196,20 +296,36 @@ def main():
             rewards.append(reward)
             steps_taken = step
 
-            log_step(step, action, reward, done, err)
+            log_step(
+                step,
+                action,
+                reward,
+                done,
+                err
+            )
 
             if done:
                 break
 
         avg_reward = sum(rewards) / max(len(rewards), 1)
-        score = min(max((avg_reward + 1.0) / 2.0, 0.0), 1.0)
+
+        score = min(
+            max((avg_reward + 1.0) / 2.0, 0.0),
+            1.0
+        )
+
         success = score >= SUCCESS_SCORE_THRESHOLD
 
     except Exception as e:
         print(f"[DEBUG] fatal={e}", flush=True)
 
     finally:
-        log_end(success, steps_taken, score, rewards)
+        log_end(
+            success,
+            steps_taken,
+            score,
+            rewards
+        )
 
 
 if __name__ == "__main__":
