@@ -1,7 +1,7 @@
 import random
 from pydantic import BaseModel
 
-# 1. Define the State Schema
+
 class CloudState(BaseModel):
     cpu_usage: float
     memory_usage: float
@@ -12,6 +12,7 @@ class CloudState(BaseModel):
     db_health: str
     cost_per_hour: float
 
+
 class CloudOpsEnv:
     def __init__(self):
         self.state_data = None
@@ -20,21 +21,22 @@ class CloudOpsEnv:
         self.max_steps = 10
         self.incident_type = None
 
-    def reset(self):
-        """Starts a new episode with a randomized incident."""
+    def reset(self, difficulty="medium"):
         self.current_step = 0
         self.done = False
-        
-        INCIDENTS = [
-            "traffic_spike",
-            "database_failure",
-            "latency_surge",
-            "idle_resource_leak"
-        ]
-        self.incident_type = random.choice(INCIDENTS)
+
+        # Task difficulty progression
+        if difficulty == "easy":
+            self.incident_type = "idle_resource_leak"
+        elif difficulty == "medium":
+            self.incident_type = random.choice(
+                ["traffic_spike", "latency_surge"]
+            )
+        else:  # hard
+            self.incident_type = "database_failure"
+
         print(f"[ENV] Episode started. Incident Type: {self.incident_type}")
 
-        # Base healthy state
         self.state_data = CloudState(
             cpu_usage=45.0,
             memory_usage=50.0,
@@ -46,21 +48,21 @@ class CloudOpsEnv:
             cost_per_hour=75.0
         )
 
-        # Apply incident modifiers
+        # Incident initialization
         if self.incident_type == "traffic_spike":
             self.state_data.traffic_load = "high"
             self.state_data.cpu_usage = 92.0
             self.state_data.latency_ms = 450.0
-        
+
         elif self.incident_type == "database_failure":
             self.state_data.db_health = "degraded"
             self.state_data.error_rate = 0.15
             self.state_data.latency_ms = 800.0
-            
+
         elif self.incident_type == "latency_surge":
             self.state_data.latency_ms = 1200.0
             self.state_data.error_rate = 0.05
-            
+
         elif self.incident_type == "idle_resource_leak":
             self.state_data.traffic_load = "low"
             self.state_data.active_servers = 8
@@ -70,85 +72,122 @@ class CloudOpsEnv:
         return self.state_data
 
     def step(self, action: str):
-        """Applies an action, calculates drift, and returns the new state and dynamic reward."""
         if self.done:
             return self.state_data, 0.0, True
 
         self.current_step += 1
-        
-        # Snapshot previous state for delta calculations
+
         prev_latency = self.state_data.latency_ms
         prev_error_rate = self.state_data.error_rate
 
-        # --- NATURAL DRIFT ---
+        # Natural drift
         if self.state_data.traffic_load == "high":
             self.state_data.cpu_usage += 8.0
             self.state_data.latency_ms += 40.0
             self.state_data.error_rate += 0.03
-            
+
         if self.state_data.db_health == "degraded":
             self.state_data.error_rate += 0.05
             self.state_data.latency_ms += 100.0
 
-        # --- ACTION EFFECTS ---
+        # Action effects
         if action == "scale_up":
             self.state_data.active_servers += 1
-            self.state_data.cpu_usage = max(0.0, self.state_data.cpu_usage - 20.0)
-            self.state_data.latency_ms = max(50.0, self.state_data.latency_ms - 40.0)
-            self.state_data.cost_per_hour += 25.0
+            self.state_data.cpu_usage = max(
+                0.0,
+                self.state_data.cpu_usage - 20.0
+            )
+            self.state_data.latency_ms = max(
+                50.0,
+                self.state_data.latency_ms - 50.0
+            )
+            self.state_data.cost_per_hour += 30.0
 
-        elif action == "scale_down" or action == "remove_idle_resource":
+        elif action in ["scale_down", "remove_idle_resource"]:
             if self.state_data.active_servers > 1:
                 self.state_data.active_servers -= 1
                 self.state_data.cpu_usage += 15.0
                 self.state_data.cost_per_hour -= 25.0
 
         elif action == "rebalance_traffic":
-            self.state_data.latency_ms = max(50.0, self.state_data.latency_ms - 60.0)
-            self.state_data.error_rate = max(0.0, self.state_data.error_rate - 0.02)
-            
-        elif action == "restart_database":
-            self.state_data.db_health = "healthy"
-            self.state_data.error_rate = max(0.0, self.state_data.error_rate - 0.10)
-            self.state_data.latency_ms += 200.0 # Temporary spike during restart
-            
-        elif action == "clear_cache":
-            self.state_data.memory_usage = max(20.0, self.state_data.memory_usage - 40.0)
-            self.state_data.latency_ms = max(50.0, self.state_data.latency_ms - 20.0)
-
-        # --- FAIL STATES (Bounds checking) ---
-        self.state_data.cpu_usage = min(100.0, self.state_data.cpu_usage)
-        if self.state_data.cpu_usage >= 100.0 or self.state_data.error_rate >= 0.50:
-            self.done = True # System crashed
-
-        # --- DYNAMIC REWARD CALCULATION ---
-        if self.done and self.state_data.cpu_usage >= 100.0:
-            reward = -5.0 # Massive penalty for crashing
-        else:
-            # 1. Uptime Score: Reward healthy CPU and DB, penalize dangerous levels
-            uptime_score = 1.0 if (self.state_data.cpu_usage < 85.0 and self.state_data.db_health == "healthy") else -1.0
-            
-            # 2. Latency Reduction: Normalize the drop in latency (e.g., dropping 100ms = 1.0)
-            latency_reduction = (prev_latency - self.state_data.latency_ms) / 100.0
-            
-            # 3. Error Reduction: Multiply by 100 to make the scale match other metrics (0.05 drop = 5.0)
-            error_reduction = (prev_error_rate - self.state_data.error_rate) * 100.0
-            
-            # 4. Cost Efficiency: Penalize high server counts when traffic isn't high
-            if self.state_data.traffic_load == "low" and self.state_data.active_servers > 3:
-                cost_efficiency = -1.0
-            else:
-                cost_efficiency = 1.0 - (self.state_data.cost_per_hour / 200.0)
-
-            # Final Formula
-            reward = (
-                (0.4 * uptime_score) +
-                (0.2 * latency_reduction) +
-                (0.2 * error_reduction) +
-                (0.2 * cost_efficiency)
+            self.state_data.latency_ms = max(
+                50.0,
+                self.state_data.latency_ms - 60.0
+            )
+            self.state_data.error_rate = max(
+                0.0,
+                self.state_data.error_rate - 0.02
             )
 
-        # Check for max steps
+        elif action == "restart_database":
+            if self.state_data.db_health == "degraded":
+                self.state_data.db_health = "healthy"
+                self.state_data.error_rate = max(
+                    0.0,
+                    self.state_data.error_rate - 0.10
+                )
+
+        elif action == "clear_cache":
+            self.state_data.memory_usage = max(
+                20.0,
+                self.state_data.memory_usage - 40.0
+            )
+            self.state_data.latency_ms = max(
+                50.0,
+                self.state_data.latency_ms - 20.0
+            )
+
+        # Failure states
+        self.state_data.cpu_usage = min(
+            100.0,
+            self.state_data.cpu_usage
+        )
+
+        if (
+            self.state_data.cpu_usage >= 100.0
+            or self.state_data.error_rate >= 0.50
+        ):
+            self.done = True
+
+        # Dynamic reward
+        if self.done and self.state_data.cpu_usage >= 100.0:
+            reward = -2.0
+        else:
+            uptime_score = (
+                1.0
+                if (
+                    self.state_data.cpu_usage < 85.0
+                    and self.state_data.db_health == "healthy"
+                )
+                else -1.0
+            )
+
+            latency_reduction = (
+                prev_latency - self.state_data.latency_ms
+            ) / 100.0
+
+            error_reduction = (
+                prev_error_rate - self.state_data.error_rate
+            ) * 100.0
+
+            if (
+                self.state_data.traffic_load == "low"
+                and self.state_data.active_servers > 3
+            ):
+                cost_efficiency = -1.0
+            else:
+                cost_efficiency = (
+                    1.0
+                    - (self.state_data.cost_per_hour / 200.0)
+                )
+
+            reward = (
+                (0.4 * uptime_score)
+                + (0.2 * latency_reduction)
+                + (0.2 * error_reduction)
+                + (0.2 * cost_efficiency)
+            )
+
         if self.current_step >= self.max_steps:
             self.done = True
 
