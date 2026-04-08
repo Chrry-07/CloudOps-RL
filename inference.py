@@ -18,22 +18,6 @@ MODEL_NAME = os.environ.get(
 
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
-client = OpenAI(
-    base_url=API_BASE_URL,
-    api_key=API_KEY
-)
-
-try:
-    _ = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "user", "content": "ping"}
-        ],
-        max_tokens=1
-    )
-except Exception:
-    pass
-
 LOCAL_ENV = None
 MAX_STEPS = 10
 SUCCESS_SCORE_THRESHOLD = 0.30
@@ -252,8 +236,28 @@ def fallback_policy(state):
 # MAIN
 # =========================
 def main():
+    global client
+    
     task_name = "incident_response"
     benchmark = "cloudops_rl"
+
+    # Initialize client
+    client = None
+    try:
+        client = OpenAI(
+            base_url=API_BASE_URL,
+            api_key=API_KEY
+        )
+        
+        _ = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "user", "content": "ping"}
+            ],
+            max_tokens=1
+        )
+    except Exception:
+        client = None
 
     log_start(task_name, benchmark, MODEL_NAME)
 
