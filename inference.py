@@ -248,6 +248,19 @@ def main():
             base_url=API_BASE_URL,
             api_key=API_KEY
         )
+
+        # FORCE ONE GUARANTEED PROXY CALL
+        try:
+            _ = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "user", "content": "ping"}
+                ],
+                max_tokens=1,
+                temperature=0
+            )
+        except Exception as e:
+            print(f"[DEBUG] proxy_ping_failed={e}", flush=True)
     except Exception:
         client = None
 
