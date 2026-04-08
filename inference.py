@@ -10,25 +10,11 @@ import textwrap
 from typing import List, Optional
 from openai import OpenAI
 
-# ── Mandatory hackathon variables ──────────────────────────────────────────────
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME   = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-# GRADER FIX: Prioritize API_KEY first as per evaluator spec, fallback to HF_TOKEN
-API_KEY      = os.getenv("API_KEY", os.getenv("HF_TOKEN", "dummy_key_to_prevent_crash"))
-
-# ── Environment connection ─────────────────────────────────────────────────────
-ENV_URL = os.getenv("ENV_URL", "http://127.0.0.1:7860").rstrip("/")
+# ── Global State ──────────────────────────────────────────────────────────────
 LOCAL_ENV = None
-
-# LLM controls
-LLM_ENABLED = API_KEY != "dummy_key_to_prevent_crash"
 LLM_ERROR_PRINTED = False
-
-# ── Episode config ─────────────────────────────────────────────────────────────
-TASK_NAME   = os.getenv("CLOUDOPS_TASK", "incident_response")
-BENCHMARK   = os.getenv("CLOUDOPS_BENCHMARK", "cloudops_rl")
-MAX_STEPS   = 10
-SUCCESS_SCORE_THRESHOLD = 0.3   # normalized score in [0, 1]
+MAX_STEPS = 10
+SUCCESS_SCORE_THRESHOLD = 0.3
 
 VALID_ACTIONS = [
     "scale_up",
@@ -77,8 +63,9 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
 # ── Env helpers ────────────────────────────────────────────────────────────────
 def env_reset() -> dict:
     global LOCAL_ENV
+    env_url = os.environ.get("ENV_URL", "http://127.0.0.1:7860").rstrip("/")
     try:
-        resp = requests.post(f"{ENV_URL}/reset", timeout=30)
+        resp = requests.post(f"{env_url}/reset", timeout=30)
         resp.raise_for_status()
         data = resp.json()
         return data.get("state", data)
@@ -94,6 +81,7 @@ def env_reset() -> dict:
 
 def env_step(action: str) -> tuple:
     global LOCAL_ENV
+    env_url = os.environ.get("ENV_URL", "http://127.0.0.1:7860").rstrip("/")
     if LOCAL_ENV is not None:
         try:
             state_obj, reward, done = LOCAL_ENV.step(action)
@@ -104,7 +92,7 @@ def env_step(action: str) -> tuple:
 
     try:
         resp = requests.post(
-            f"{ENV_URL}/step",
+            f"{env_url}/step",
             json={"action": action},
             timeout=30,
         )
@@ -118,8 +106,9 @@ def env_step(action: str) -> tuple:
     except requests.exceptions.RequestException:
         try:
             from env import CloudOpsEnv
-            LOCAL_ENV = CloudOpsEnv()
-            LOCAL_ENV.reset()
+            if LOCAL_ENV is None:
+                LOCAL_ENV = CloudOpsEnv()
+                LOCAL_ENV.reset()
             state_obj, reward, done = LOCAL_ENV.step(action)
             state = state_to_dict(state_obj)
             return state, float(reward), bool(done), None
@@ -140,7 +129,7 @@ def state_to_dict(state_obj):
     return state_obj
 
 # ── LLM decision ──────────────────────────────────────────────────────────────
-def get_action(client: OpenAI, state: dict, step: int, history: List[str]) -> str:
+def get_action(client: OpenAI, state: dict, step: int, history: List[str], model_name: str) -> str:
     cpu = state.get("cpu_usage", 0)
     latency = state.get("latency_ms", 0)
     error_rate = state.get("error_rate", 0)
@@ -163,10 +152,10 @@ def get_action(client: OpenAI, state: dict, step: int, history: List[str]) -> st
     Choose the best action.
     """
 
-    if client is not None and LLM_ENABLED:
+    if client is not None:
         try:
             completion = client.chat.completions.create(
-                model=MODEL_NAME,
+                model=model_name,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_content},
@@ -212,22 +201,26 @@ def get_action(client: OpenAI, state: dict, step: int, history: List[str]) -> st
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main() -> None:
+    # Read environment variables AT RUNTIME so the evaluator can successfully inject them
+    task_name = os.environ.get("CLOUDOPS_TASK", "incident_response")
+    benchmark = os.environ.get("CLOUDOPS_BENCHMARK", "cloudops_rl")
+    model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+    
+    # Strictly read API keys as instructed by the grader
+    api_base_url = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+    api_key = os.environ.get("API_KEY", os.environ.get("HF_TOKEN", "dummy_key"))
+
+    log_start(task=task_name, env=benchmark, model=model_name)
+
     rewards:     List[float] = []
     history:     List[str]   = []
     steps_taken: int         = 0
     score:       float       = 0.0
     success:     bool        = False
 
-    log_start(task=TASK_NAME, env=BENCHMARK, model=MODEL_NAME)
-
     try:
-        client = None
-        if LLM_ENABLED:
-            try:
-                client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-            except Exception as exc:
-                print(f"[DEBUG] LLM client init failed, disabling LLM: {exc}", flush=True)
-                client = None
+        # Initialize client exactly as requested by the grader
+        client = OpenAI(base_url=api_base_url, api_key=api_key)
         
         state = env_reset()
         done  = False
@@ -236,7 +229,7 @@ def main() -> None:
             if done:
                 break
 
-            action = get_action(client, state, step, history)
+            action = get_action(client, state, step, history, model_name)
 
             try:
                 state, reward, done, step_error = env_step(action)
