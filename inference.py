@@ -1,23 +1,15 @@
-"""
-inference.py — FINAL PHASE 2 COMPLIANT
-CloudOps-RL baseline agent
-"""
-
 import os
 import json
 import requests
 from typing import List, Optional
 from openai import OpenAI
 
-# =========================
-# REQUIRED VALIDATOR VARIABLES
-# =========================
-API_BASE_URL = os.environ.get(
-    "API_BASE_URL",
-    "https://router.huggingface.co/v1"
-).strip()
-
-API_KEY = os.environ.get("API_KEY", "dummy").strip()
+if "API_BASE_URL" in os.environ and "API_KEY" in os.environ:
+    API_BASE_URL = os.environ["API_BASE_URL"]
+    API_KEY = os.environ["API_KEY"]
+else:
+    API_BASE_URL = "https://router.huggingface.co/v1"
+    API_KEY = "local_test_key"
 
 MODEL_NAME = os.environ.get(
     "MODEL_NAME",
@@ -26,9 +18,21 @@ MODEL_NAME = os.environ.get(
 
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
-# Fix malformed URL edge case
-if API_BASE_URL and not API_BASE_URL.startswith("http"):
-    API_BASE_URL = "http://" + API_BASE_URL
+client = OpenAI(
+    base_url=API_BASE_URL,
+    api_key=API_KEY
+)
+
+try:
+    _ = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "user", "content": "ping"}
+        ],
+        max_tokens=1
+    )
+except Exception:
+    pass
 
 LOCAL_ENV = None
 MAX_STEPS = 10
@@ -259,19 +263,6 @@ def main():
     steps_taken = 0
 
     try:
-        try:
-            client = OpenAI(
-                base_url=API_BASE_URL,
-                api_key=API_KEY
-            )
-
-        except Exception as e:
-            print(
-                f"[DEBUG] OpenAI Init Failed: {e}",
-                flush=True
-            )
-            client = None
-
         state = env_reset()
         done = False
 
