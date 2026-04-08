@@ -248,14 +248,6 @@ def main():
             base_url=API_BASE_URL,
             api_key=API_KEY
         )
-        
-        _ = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "user", "content": "ping"}
-            ],
-            max_tokens=1
-        )
     except Exception:
         client = None
 
