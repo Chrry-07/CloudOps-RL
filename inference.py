@@ -4,11 +4,6 @@ import requests
 from typing import List, Optional
 from openai import OpenAI
 
-# MUST use the provided proxy URL and API key
-API_BASE_URL = os.environ["API_BASE_URL"]
-API_KEY = os.environ["API_KEY"]
-MODEL_NAME = os.environ["MODEL_NAME"]
-
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 LOCAL_ENV = None
@@ -174,6 +169,9 @@ def env_step(action: str):
 # LLM ACTION
 # =========================
 def llm_action(client, state, model_name):
+    if client is None:
+        return fallback_policy(state)
+
     response = client.chat.completions.create(
         model=model_name,
         messages=[
@@ -225,20 +223,24 @@ def fallback_policy(state):
     return "clear_cache"
 
 
-# =========================
 # MAIN
-# =========================
 def main():
-    global client
+    # MUST use the provided proxy URL and API key
+    API_BASE_URL = os.environ["API_BASE_URL"]
+    API_KEY = os.environ["API_KEY"]
+    MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-3.5-turbo")
     
     task_name = "incident_response"
     benchmark = "cloudops_rl"
 
     # Initialize client with the provided proxy
-    client = OpenAI(
-        base_url=API_BASE_URL,
-        api_key=API_KEY
-    )
+    client = None
+
+    if API_BASE_URL and API_KEY:
+        client = OpenAI(
+            base_url=API_BASE_URL,
+            api_key=API_KEY
+        )
 
     log_start(task_name, benchmark, MODEL_NAME)
 
