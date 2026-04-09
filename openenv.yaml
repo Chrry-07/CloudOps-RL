@@ -1,56 +1,57 @@
-name: CloudOps-RL
-version: 1.0.0
-
+name: cloudops-rl
+version: "1.0.0"
 description: >
-  A benchmark-grade OpenEnv environment where an AI agent monitors
-  cloud infrastructure metrics, diagnoses system incidents, and takes
-  corrective actions to maximize uptime while minimizing operational cost.
-
-entrypoint:
-  reset: /reset
-  step: /step
-  state: /state
+  CloudOps Incident Response RL environment. An AI agent acts as an SRE,
+  diagnosing and resolving cloud infrastructure incidents (traffic spikes,
+  database failures, idle resource leaks) through a structured action space.
 
 observation_space:
-  cpu_usage: integer
-  memory_usage: integer
-  latency_ms: integer
-  error_rate: float
-  traffic_load: string
-  active_servers: integer
-  db_health: string
-  cost_per_hour: integer
+  type: dict
+  fields:
+    cpu_usage:      {type: float, description: "CPU utilisation 0–100%"}
+    memory_usage:   {type: float, description: "Memory utilisation 0–100%"}
+    latency_ms:     {type: float, description: "P99 response latency in ms"}
+    error_rate:     {type: float, description: "Fraction of failed requests 0–1"}
+    traffic_load:   {type: str,   description: "low | normal | high"}
+    active_servers: {type: int,   description: "Number of active server instances"}
+    db_health:      {type: str,   description: "healthy | degraded"}
+    cost_per_hour:  {type: float, description: "Current infra cost in USD/hr"}
 
 action_space:
-  - scale_up
-  - scale_down
-  - restart_service
-  - restart_database
-  - rebalance_traffic
-  - clear_cache
-  - remove_idle_resource
-  - noop
-
-tasks:
-  - name: Resource Cleanup
-    difficulty: easy
-    objective: Reduce cost without affecting uptime
-
-  - name: Performance Optimization
-    difficulty: medium
-    objective: Balance performance and cost
-
-  - name: Incident Response
-    difficulty: hard
-    objective: Recover from sudden infrastructure failures
+  type: discrete
+  actions:
+    - scale_up
+    - scale_down
+    - restart_database
+    - rebalance_traffic
+    - clear_cache
+    - remove_idle_resource
+    - noop
 
 reward:
-  type: dense
-  range: [0.0, 1.0]
+  range: [-2.0, 1.0]
   description: >
-    Reward is based on uptime stability, latency reduction,
-    error minimization, and cost efficiency.
+    Composite reward = 0.4 * uptime_score + 0.2 * latency_reduction
+    + 0.2 * error_reduction + 0.2 * cost_efficiency.
+    Catastrophic failure (cpu >= 100 or error_rate >= 0.5) yields -2.0.
 
-grader:
-  deterministic: true
-  score_range: [0.0, 1.0]
+tasks:
+  - id: idle_resource_leak
+    difficulty: easy
+    success_threshold: 0.40
+
+  - id: traffic_spike
+    difficulty: medium
+    success_threshold: 0.35
+
+  - id: database_failure
+    difficulty: hard
+    success_threshold: 0.30
+
+endpoints:
+  reset: POST /reset
+  step:  POST /step
+  state: GET  /state
+  tasks: GET  /tasks
+
+max_steps: 10
