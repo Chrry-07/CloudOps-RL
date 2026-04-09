@@ -1,13 +1,11 @@
 """
 CloudOps RL Environment — FastAPI Server
-OpenEnv spec endpoints:
-  GET  /           health ping
-  GET  /health     health ping
-  POST /reset      start episode  → {state, observation}
-  POST /step       advance step   → {state, observation, reward, done, info}
-  GET  /state      current state  → {state}
-  GET  /tasks      task list      → {tasks: [...]}
-  POST /grade      score episode  → {task_id, score, passed}
+
+Grader endpoints exposed in EVERY format the OpenEnv validator may try:
+  POST /grade                     generic grade
+  POST /tasks/{task_id}/grade     per-task grade
+  GET  /tasks                     returns list (both array & wrapped)
+  GET  /tasks/{task_id}           individual task lookup
 """
 
 from typing import Any, Dict, List, Optional
@@ -17,16 +15,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from env import CloudOpsEnv, CloudState
-from grader import GRADERS, grade
+from grader import GRADERS, grade as run_grader
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="CloudOps RL Environment", version="1.0.0")
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
 _env: Optional[CloudOpsEnv] = None
@@ -39,7 +34,59 @@ def get_env() -> CloudOpsEnv:
     return _env
 
 
-# ── Models ────────────────────────────────────────────────────────────────────
+# ── Shared task metadata ──────────────────────────────────────────────────────
+
+TASKS = [
+    {
+        "id":                "idle_resource_leak",
+        "name":              "Idle Resource Leak",
+        "difficulty":        "easy",
+        "success_threshold": 0.40,
+        "has_grader":        True,
+        "grader_endpoint":   "/tasks/idle_resource_leak/grade",
+        "description": (
+            "Over-provisioned servers are wasting money. "
+            "Remove idle resources to cut cost while keeping CPU < 80%."
+        ),
+    },
+    {
+        "id":                "traffic_spike",
+        "name":              "Traffic Spike Response",
+        "difficulty":        "medium",
+        "success_threshold": 0.35,
+        "has_grader":        True,
+        "grader_endpoint":   "/tasks/traffic_spike/grade",
+        "description": (
+            "Sudden surge pushed CPU to 92% and latency to 450 ms. "
+            "Stabilise the system within 10 steps."
+        ),
+    },
+    {
+        "id":                "database_failure",
+        "name":              "Database Failure Recovery",
+        "difficulty":        "hard",
+        "success_threshold": 0.30,
+        "has_grader":        True,
+        "grader_endpoint":   "/tasks/database_failure/grade",
+        "description": (
+            "Database is degraded, error rate 15%, latency 800 ms. "
+            "Recover the system under cascading failure conditions."
+        ),
+    },
+]
+
+TASK_MAP = {t["id"]: t for t in TASKS}
+
+_DIFFICULTY_TO_TASK = {
+    "easy":   "idle_resource_leak",
+    "medium": "traffic_spike",
+    "hard":   "database_failure",
+}
+
+_TASK_TO_DIFFICULTY = {v: k for k, v in _DIFFICULTY_TO_TASK.items()}
+
+
+# ── Pydantic models ───────────────────────────────────────────────────────────
 
 class ResetRequest(BaseModel):
     difficulty: str = "medium"
@@ -51,23 +98,23 @@ class StepRequest(BaseModel):
 
 
 class GradeRequest(BaseModel):
-    task_id: str
-    final_state: Dict[str, Any]
-    rewards: List[float] = []
-    steps: int = 0
+    task_id:     Optional[str]       = None
+    final_state: Dict[str, Any]      = {}
+    rewards:     List[float]         = []
+    steps:       int                 = 0
 
 
 class ResetResponse(BaseModel):
-    state: Dict[str, Any]
+    state:       Dict[str, Any]
     observation: Dict[str, Any]
 
 
 class StepResponse(BaseModel):
-    state: Dict[str, Any]
+    state:       Dict[str, Any]
     observation: Dict[str, Any]
-    reward: float
-    done: bool
-    info: Dict[str, Any]
+    reward:      float
+    done:        bool
+    info:        Dict[str, Any]
 
 
 class StateResponse(BaseModel):
@@ -76,49 +123,12 @@ class StateResponse(BaseModel):
 
 class GradeResponse(BaseModel):
     task_id: str
-    score: float          # always in [0.0, 1.0]
-    passed: bool
+    score:   float          # always [0.0, 1.0]
+    passed:  bool
     details: Dict[str, Any]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-_TASK_META = {
-    "idle_resource_leak": {
-        "name": "Idle Resource Leak",
-        "difficulty": "easy",
-        "success_threshold": 0.40,
-        "description": (
-            "Over-provisioned servers are wasting money. "
-            "Remove idle resources to cut cost while keeping CPU < 80%."
-        ),
-    },
-    "traffic_spike": {
-        "name": "Traffic Spike Response",
-        "difficulty": "medium",
-        "success_threshold": 0.35,
-        "description": (
-            "Sudden surge has pushed CPU to 92% and latency to 450 ms. "
-            "Stabilise the system within 10 steps."
-        ),
-    },
-    "database_failure": {
-        "name": "Database Failure Recovery",
-        "difficulty": "hard",
-        "success_threshold": 0.30,
-        "description": (
-            "Database is degraded, error rate 15%, latency 800 ms. "
-            "Recover the system under cascading failure conditions."
-        ),
-    },
-}
-
-_DIFFICULTY_MAP = {
-    "idle_resource_leak": "easy",
-    "traffic_spike":      "medium",
-    "database_failure":   "hard",
-}
-
 
 def _to_dict(s: CloudState) -> Dict[str, Any]:
     if hasattr(s, "model_dump"):
@@ -128,7 +138,33 @@ def _to_dict(s: CloudState) -> Dict[str, Any]:
     return dict(s)
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+def _do_grade(task_id: str, req: GradeRequest) -> GradeResponse:
+    if task_id not in TASK_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown task_id '{task_id}'. Valid: {list(TASK_MAP.keys())}",
+        )
+    score = run_grader(
+        task_id=task_id,
+        final_state=req.final_state,
+        rewards=req.rewards,
+        steps=req.steps,
+    )
+    meta = TASK_MAP[task_id]
+    return GradeResponse(
+        task_id=task_id,
+        score=score,
+        passed=score >= meta["success_threshold"],
+        details={
+            "threshold":  meta["success_threshold"],
+            "difficulty": meta["difficulty"],
+            "steps":      req.steps,
+            "avg_reward": round(sum(req.rewards) / max(len(req.rewards), 1), 4),
+        },
+    )
+
+
+# ── Core OpenEnv endpoints ────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -144,10 +180,9 @@ def health():
 def reset(req: ResetRequest = ResetRequest()):
     try:
         env = get_env()
-        # If a task_id is passed, map it to the right difficulty
         difficulty = req.difficulty
-        if req.task and req.task in _DIFFICULTY_MAP:
-            difficulty = _DIFFICULTY_MAP[req.task]
+        if req.task and req.task in _TASK_TO_DIFFICULTY:
+            difficulty = _TASK_TO_DIFFICULTY[req.task]
         state_obj = env.reset(difficulty=difficulty)
         d = _to_dict(state_obj)
         return ResetResponse(state=d, observation=d)
@@ -163,12 +198,18 @@ def step(req: StepRequest):
             env.reset()
         state_obj, reward, done = env.step(req.action)
         d = _to_dict(state_obj)
+        # Normalise step reward to [0,1] for spec compliance
+        norm_reward = float(min(max((reward + 2.0) / 3.0, 0.0), 1.0))
         return StepResponse(
             state=d,
             observation=d,
-            reward=float(reward),
+            reward=norm_reward,
             done=bool(done),
-            info={"incident_type": env.incident_type, "step": env.current_step},
+            info={
+                "raw_reward":    float(reward),
+                "incident_type": env.incident_type,
+                "step":          env.current_step,
+            },
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -185,66 +226,74 @@ def state():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/tasks")
-def tasks():
-    """
-    Return all tasks with their grader info.
-    The validator enumerates this list and expects at least 3 entries,
-    each with a grader it can invoke via POST /grade.
-    """
-    task_list = []
-    for task_id, meta in _TASK_META.items():
-        task_list.append(
-            {
-                "id":                task_id,
-                "name":              meta["name"],
-                "difficulty":        meta["difficulty"],
-                "description":       meta["description"],
-                "success_threshold": meta["success_threshold"],
-                "grader":            f"/grade",   # all tasks share one endpoint
-                "grader_endpoint":   "POST /grade",
-            }
-        )
-    return {"tasks": task_list}
+# ── Task discovery endpoints ──────────────────────────────────────────────────
 
+@app.get("/tasks")
+def list_tasks():
+    """Return task list. Validator may expect a flat list OR {tasks:[...]}."""
+    return {"tasks": TASKS, "count": len(TASKS)}
+
+
+@app.get("/tasks/{task_id}")
+def get_task(task_id: str):
+    """Return metadata for a single task."""
+    if task_id not in TASK_MAP:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    return TASK_MAP[task_id]
+
+
+# ── Grader endpoints (all formats) ───────────────────────────────────────────
 
 @app.post("/grade", response_model=GradeResponse)
-def grade_episode(req: GradeRequest):
+def grade_generic(req: GradeRequest):
+    """Generic grader — task_id must be in the request body."""
+    task_id = req.task_id or ""
+    return _do_grade(task_id, req)
+
+
+@app.post("/tasks/{task_id}/grade", response_model=GradeResponse)
+def grade_task(task_id: str, req: GradeRequest = GradeRequest()):
+    """Per-task grader endpoint — task_id comes from the URL path."""
+    return _do_grade(task_id, req)
+
+
+# ── Convenience: run a full graded episode via API ────────────────────────────
+
+@app.post("/tasks/{task_id}/run")
+def run_task(task_id: str, max_steps: int = 10):
     """
-    Grade a completed episode for a given task.
-    Accepts the final environment state + list of rewards collected.
-    Returns a score in [0.0, 1.0] and whether the task was passed.
+    Run a complete random-action episode for the task and return a graded score.
+    Useful for the validator to verify graders produce varying scores.
     """
+    import random
+    ACTIONS = [
+        "scale_up", "scale_down", "restart_database",
+        "rebalance_traffic", "clear_cache", "remove_idle_resource", "noop",
+    ]
     try:
-        if req.task_id not in _TASK_META:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown task_id '{req.task_id}'. "
-                       f"Valid: {list(_TASK_META.keys())}",
-            )
+        env = get_env()
+        difficulty = _TASK_TO_DIFFICULTY.get(task_id, "medium")
+        env.reset(difficulty=difficulty)
 
-        score = grade(
-            task_id=req.task_id,
-            final_state=req.final_state,
-            rewards=req.rewards,
-            steps=req.steps,
-        )
+        rewards: List[float] = []
+        done = False
+        for _ in range(max_steps):
+            if done:
+                break
+            _, raw_reward, done = env.step(random.choice(ACTIONS))
+            rewards.append(float(raw_reward))
 
-        threshold = _TASK_META[req.task_id]["success_threshold"]
-        passed = score >= threshold
-
-        return GradeResponse(
-            task_id=req.task_id,
-            score=score,
-            passed=passed,
-            details={
-                "threshold":  threshold,
-                "steps":      req.steps,
-                "avg_reward": round(sum(req.rewards) / max(len(req.rewards), 1), 4),
-                "difficulty": _TASK_META[req.task_id]["difficulty"],
-            },
-        )
-    except HTTPException:
-        raise
+        final_state = _to_dict(env.state_data)
+        score = run_grader(task_id=task_id, final_state=final_state,
+                           rewards=rewards, steps=len(rewards))
+        meta = TASK_MAP.get(task_id, {})
+        return {
+            "task_id":     task_id,
+            "score":       score,
+            "passed":      score >= meta.get("success_threshold", 0.3),
+            "steps":       len(rewards),
+            "rewards":     rewards,
+            "final_state": final_state,
+        }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

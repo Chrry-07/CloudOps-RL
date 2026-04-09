@@ -2,23 +2,24 @@ name: cloudops-rl
 version: "1.0.0"
 description: >
   CloudOps Incident Response RL environment. An AI agent acts as an SRE,
-  diagnosing and resolving cloud infrastructure incidents (traffic spikes,
-  database failures, idle resource leaks) through a structured action space.
+  diagnosing and resolving cloud infrastructure incidents through a
+  structured action space.
 
 observation_space:
   type: dict
   fields:
-    cpu_usage:      {type: float, description: "CPU utilisation 0–100%"}
-    memory_usage:   {type: float, description: "Memory utilisation 0–100%"}
-    latency_ms:     {type: float, description: "P99 response latency in ms"}
-    error_rate:     {type: float, description: "Fraction of failed requests 0–1"}
-    traffic_load:   {type: str,   description: "low | normal | high"}
-    active_servers: {type: int,   description: "Number of active server instances"}
-    db_health:      {type: str,   description: "healthy | degraded"}
-    cost_per_hour:  {type: float, description: "Current infra cost in USD/hr"}
+    cpu_usage:      {type: float, range: [0, 100], description: "CPU utilisation %"}
+    memory_usage:   {type: float, range: [0, 100], description: "Memory utilisation %"}
+    latency_ms:     {type: float, range: [0, 5000], description: "P99 latency in ms"}
+    error_rate:     {type: float, range: [0, 1],   description: "Fraction of failed requests"}
+    traffic_load:   {type: str,   values: [low, normal, high]}
+    active_servers: {type: int,   range: [1, 20]}
+    db_health:      {type: str,   values: [healthy, degraded]}
+    cost_per_hour:  {type: float, range: [0, 500], description: "Infra cost USD/hr"}
 
 action_space:
   type: discrete
+  n: 7
   actions:
     - scale_up
     - scale_down
@@ -29,29 +30,47 @@ action_space:
     - noop
 
 reward:
-  range: [-2.0, 1.0]
+  range: [0.0, 1.0]
   description: >
-    Composite reward = 0.4 * uptime_score + 0.2 * latency_reduction
-    + 0.2 * error_reduction + 0.2 * cost_efficiency.
-    Catastrophic failure (cpu >= 100 or error_rate >= 0.5) yields -2.0.
+    Normalised composite reward in [0,1].
+    Raw = 0.4*uptime + 0.2*latency_reduction + 0.2*error_reduction + 0.2*cost_efficiency.
+    Catastrophic failure yields 0.0. Normalised via (raw+2)/3.
 
 tasks:
   - id: idle_resource_leak
+    name: Idle Resource Leak
     difficulty: easy
     success_threshold: 0.40
+    has_grader: true
+    grader_endpoint: "POST /tasks/idle_resource_leak/grade"
+    description: >
+      Active servers=8, cost=$200/hr, cpu=15%. Remove idle resources
+      to cut cost and servers while keeping CPU stable.
 
   - id: traffic_spike
+    name: Traffic Spike Response
     difficulty: medium
     success_threshold: 0.35
+    has_grader: true
+    grader_endpoint: "POST /tasks/traffic_spike/grade"
+    description: >
+      cpu=92%, latency=450ms, traffic=high. Stabilise within 10 steps.
 
   - id: database_failure
+    name: Database Failure Recovery
     difficulty: hard
     success_threshold: 0.30
+    has_grader: true
+    grader_endpoint: "POST /tasks/database_failure/grade"
+    description: >
+      db_health=degraded, error_rate=15%, latency=800ms.
+      Recover the system under cascading failure.
 
 endpoints:
-  reset: POST /reset
-  step:  POST /step
-  state: GET  /state
-  tasks: GET  /tasks
+  reset:  "POST /reset"
+  step:   "POST /step"
+  state:  "GET /state"
+  tasks:  "GET /tasks"
+  grade:  "POST /grade"
 
 max_steps: 10
