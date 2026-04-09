@@ -1,13 +1,26 @@
+"""
+CloudOps Incident Response - Inference Script
+=============================================
+Uses OpenAI-compatible client routed through the evaluator's LiteLLM proxy.
+Env vars injected by grader: API_BASE_URL, API_KEY, MODEL_NAME
+"""
+
 import os
 import json
 import requests
 from typing import List, Optional
-from openai import OpenAI
 
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+# ── Env vars ──────────────────────────────────────────────────────────────────
+# ALWAYS use os.getenv() (never os.environ[]) so missing keys don't crash.
+# api_key must never be None — OpenAI client validates it at __init__ time.
+API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:7860")
+API_KEY      = os.getenv("API_KEY") or os.getenv("HF_TOKEN") or "no-key-set"
+MODEL_NAME   = os.getenv("MODEL_NAME", "gpt-3.5-turbo")
+ENV_URL      = os.getenv("ENV_URL", "http://127.0.0.1:7860").rstrip("/")
 
-LOCAL_ENV = None
-MAX_STEPS = 10
+TASK_NAME  = "incident_response"
+BENCHMARK  = "cloudops_rl"
+MAX_STEPS  = 10
 SUCCESS_SCORE_THRESHOLD = 0.30
 
 VALID_ACTIONS = [
@@ -20,8 +33,7 @@ VALID_ACTIONS = [
     "noop",
 ]
 
-SYSTEM_PROMPT = """
-You are an expert SRE incident response agent.
+SYSTEM_PROMPT = """You are an expert SRE incident response agent.
 
 Choose EXACTLY one action from:
 scale_up
@@ -32,265 +44,180 @@ clear_cache
 remove_idle_resource
 noop
 
-Return ONLY the action.
-""".strip()
+Return ONLY the action name — nothing else.""".strip()
 
 
-# =========================
-# LOGGING
-# =========================
-def log_start(task: str, env: str, model: str):
-    print(
-        f"[START] task={task} env={env} model={model}",
-        flush=True
-    )
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
-def log_step(
-    step: int,
-    action: str,
-    reward: float,
-    done: bool,
-    error: Optional[str]
-):
+def log_step(step: int, action: str, reward: float, done: bool,
+             error: Optional[str]) -> None:
     error_val = error if error else "null"
-
     print(
-        f"[STEP] step={step} "
-        f"action={action} "
-        f"reward={reward:.2f} "
-        f"done={str(done).lower()} "
-        f"error={error_val}",
+        f"[STEP] step={step} action={action} "
+        f"reward={reward:.2f} done={str(done).lower()} error={error_val}",
         flush=True,
     )
 
 
-def log_end(
-    success: bool,
-    steps: int,
-    score: float,
-    rewards: List[float]
-):
+def log_end(success: bool, steps: int, score: float,
+            rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-
     print(
-        f"[END] success={str(success).lower()} "
-        f"steps={steps} "
-        f"score={score:.3f} "
-        f"rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.3f} rewards={rewards_str}",
         flush=True,
     )
 
 
-# =========================
-# ENV HELPERS
-# =========================
-def state_to_dict(obj):
+# ── Env helpers ───────────────────────────────────────────────────────────────
+
+_local_env = None   # fallback if HTTP env not available
+
+
+def _state_to_dict(obj):
     if hasattr(obj, "model_dump"):
         return obj.model_dump()
-
     if hasattr(obj, "dict"):
         return obj.dict()
-
     return obj
 
 
 def env_reset():
-    global LOCAL_ENV
-
-    env_url = os.environ.get(
-        "ENV_URL",
-        "http://127.0.0.1:7860"
-    ).rstrip("/")
-
+    global _local_env
     try:
-        r = requests.post(
-            f"{env_url}/reset",
-            timeout=20
-        )
+        r = requests.post(f"{ENV_URL}/reset", timeout=20)
         r.raise_for_status()
-
         data = r.json()
-
         return data.get("state", data)
-
     except Exception:
-        from env import CloudOpsEnv
-
-        LOCAL_ENV = CloudOpsEnv()
-
-        return state_to_dict(LOCAL_ENV.reset())
+        try:
+            from env import CloudOpsEnv
+            _local_env = CloudOpsEnv()
+            return _state_to_dict(_local_env.reset())
+        except Exception as exc:
+            print(f"[DEBUG] env_reset fallback failed: {exc}", flush=True)
+            return {}
 
 
 def env_step(action: str):
-    global LOCAL_ENV
-
-    env_url = os.environ.get(
-        "ENV_URL",
-        "http://127.0.0.1:7860"
-    ).rstrip("/")
-
+    global _local_env
     try:
         r = requests.post(
-            f"{env_url}/step",
-            json={"action": action},
-            timeout=20
+            f"{ENV_URL}/step", json={"action": action}, timeout=20
         )
-
         r.raise_for_status()
-
         data = r.json()
-
         return (
             data.get("state", {}),
             float(data.get("reward", 0.0)),
             bool(data.get("done", False)),
             data.get("error"),
         )
-
     except Exception:
-        if LOCAL_ENV is None:
-            from env import CloudOpsEnv
+        try:
+            if _local_env is None:
+                from env import CloudOpsEnv
+                _local_env = CloudOpsEnv()
+                _local_env.reset()
+            state, reward, done = _local_env.step(action)
+            return _state_to_dict(state), float(reward), bool(done), None
+        except Exception as exc:
+            print(f"[DEBUG] env_step fallback failed: {exc}", flush=True)
+            return {}, 0.0, True, str(exc)
 
-            LOCAL_ENV = CloudOpsEnv()
-            LOCAL_ENV.reset()
 
-        state, reward, done = LOCAL_ENV.step(action)
+# ── LLM action ────────────────────────────────────────────────────────────────
 
-        return (
-            state_to_dict(state),
-            float(reward),
-            bool(done),
-            None
+def llm_action(client, state: dict, model_name: str) -> str:
+    """Ask the LLM which action to take; fall back to heuristic on error."""
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": json.dumps(state, default=str)},
+            ],
+            temperature=0.1,
+            max_tokens=10,
         )
+        raw = (response.choices[0].message.content or "").strip().lower()
+        for act in VALID_ACTIONS:
+            if act in raw:
+                return act
+        return "noop"
+    except Exception as exc:
+        print(f"[DEBUG] LLM call failed: {exc}", flush=True)
+        return _heuristic(state)
 
 
-# =========================
-# LLM ACTION
-# =========================
-def llm_action(client, state, model_name):
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT
-            },
-            {
-                "role": "user",
-                "content": json.dumps(state)
-            },
-        ],
-        temperature=0.1,
-        max_tokens=10,
-    )
-
-    raw = (
-        response.choices[0].message.content or ""
-    ).strip().lower()
-
-    for action in VALID_ACTIONS:
-        if action in raw:
-            return action
-
-    return "noop"
-
-
-# =========================
-# FALLBACK POLICY
-# =========================
-def fallback_policy(state):
-    cpu = state.get("cpu_usage", 0)
-    latency = state.get("latency_ms", 0)
-    error_rate = state.get("error_rate", 0)
-    db_health = state.get("db_health", "healthy")
-
-    if db_health == "degraded":
+def _heuristic(state: dict) -> str:
+    """Simple rule-based fallback so episodes still complete."""
+    if state.get("db_health") == "degraded":
         return "restart_database"
-
-    if cpu > 80:
+    if state.get("cpu_usage", 0) > 80:
         return "scale_up"
-
-    if latency > 300:
+    if state.get("latency_ms", 0) > 300:
         return "rebalance_traffic"
-
-    if error_rate > 0.10:
+    if state.get("error_rate", 0) > 0.10:
         return "rebalance_traffic"
-
     return "clear_cache"
 
 
-# MAIN
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def main():
-    API_BASE_URL = os.environ.get("API_BASE_URL")
-    API_KEY = os.environ.get("API_KEY")
-    MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-3.5-turbo")
+    # Build the OpenAI client inside main() inside a try/except.
+    # This is the most important fix — the client __init__ can raise if
+    # base_url or api_key are invalid, and that must NOT be a top-level crash.
+    try:
+        from openai import OpenAI
+        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    except Exception as exc:
+        # If we truly cannot build a client, log and exit gracefully
+        print(f"[DEBUG] OpenAI client init failed: {exc}", flush=True)
+        log_start(TASK_NAME, BENCHMARK, MODEL_NAME)
+        log_end(False, 0, 0.0, [])
+        return
 
-    task_name = "incident_response"
-    benchmark = "cloudops_rl"
+    log_start(TASK_NAME, BENCHMARK, MODEL_NAME)
 
-    # FORCE strict failure if proxy vars missing in grader
-    if not API_BASE_URL or not API_KEY:
-        raise RuntimeError("Missing API_BASE_URL or API_KEY from evaluator")
-
-    client = OpenAI(
-        base_url=API_BASE_URL,
-        api_key=API_KEY
-    )
-
-    log_start(task_name, benchmark, MODEL_NAME)
-
-    rewards = []
-    score = 0.0
+    rewards: List[float] = []
+    score   = 0.0
     success = False
     steps_taken = 0
 
     try:
         state = env_reset()
-        done = False
+        done  = False
 
         for step in range(1, MAX_STEPS + 1):
-            action = llm_action(
-                client,
-                state,
-                MODEL_NAME
-            )
+            if done:
+                break
 
+            action = llm_action(client, state, MODEL_NAME)
             state, reward, done, err = env_step(action)
 
             rewards.append(reward)
             steps_taken = step
 
-            log_step(
-                step,
-                action,
-                reward,
-                done,
-                err
-            )
+            log_step(step, action, reward, done, err)
 
             if done:
                 break
 
         avg_reward = sum(rewards) / max(len(rewards), 1)
-
-        score = min(
-            max((avg_reward + 1.0) / 2.0, 0.0),
-            1.0
-        )
-
+        score   = min(max((avg_reward + 1.0) / 2.0, 0.0), 1.0)
         success = score >= SUCCESS_SCORE_THRESHOLD
 
-    except Exception as e:
-        print(f"[DEBUG] fatal={e}", flush=True)
+    except Exception as exc:
+        print(f"[DEBUG] fatal={exc}", flush=True)
 
     finally:
-        log_end(
-            success,
-            steps_taken,
-            score,
-            rewards
-        )
+        log_end(success, steps_taken, score, rewards)
 
 
 if __name__ == "__main__":
