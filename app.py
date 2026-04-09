@@ -231,7 +231,7 @@ def state():
 @app.get("/tasks")
 def list_tasks():
     """Return task list. Validator may expect a flat list OR {tasks:[...]}."""
-    return {"tasks": TASKS, "count": len(TASKS)}
+    return TASKS
 
 
 @app.get("/tasks/{task_id}")
